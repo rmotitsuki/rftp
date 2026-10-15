@@ -1355,12 +1355,16 @@ cq_worker_send(void *arg)
 	for ( ; ; ) {
 		/* get wc from wc list */
 		TAILQ_LOCK(&send_evwc_tqh);
-		while (TAILQ_EMPTY(&send_evwc_tqh)) {
+		while (TAILQ_EMPTY(&send_evwc_tqh) && !cb->wk_stop) {
 			if ((ret = TAILQ_WAIT(&send_evwc_tqh)) != 0) {
 				syslog(LOG_ERR, "cq_worker_sender(%d): tailq wait fail: %d(%s)\n", \
 					gettid(), errno, strerror(errno));
 				continue;
 			}
+		}
+		if (TAILQ_EMPTY(&send_evwc_tqh)) {	/* asked to stop */
+			TAILQ_UNLOCK(&send_evwc_tqh);
+			break;
 		}
 
 		evwc = TAILQ_FIRST(&send_evwc_tqh);
@@ -1394,9 +1398,13 @@ cq_worker_recv(void *arg)
 	for ( ; ; ) {
 		/* get wc from wc list */
 		TAILQ_LOCK(&recv_evwc_tqh);
-		while (TAILQ_EMPTY(&recv_evwc_tqh)) {
+		while (TAILQ_EMPTY(&recv_evwc_tqh) && !cb->wk_stop) {
 			if (TAILQ_WAIT(&recv_evwc_tqh) != 0)
 				continue;
+		}
+		if (TAILQ_EMPTY(&recv_evwc_tqh)) {	/* asked to stop */
+			TAILQ_UNLOCK(&recv_evwc_tqh);
+			break;
 		}
 
 		evwc = TAILQ_FIRST(&recv_evwc_tqh);
@@ -1430,9 +1438,13 @@ cq_worker_write(void *arg)
 	for ( ; ; ) {
 		/* get wc from wc list */
 		TAILQ_LOCK(&write_evwc_tqh);
-		while (TAILQ_EMPTY(&write_evwc_tqh)) {
+		while (TAILQ_EMPTY(&write_evwc_tqh) && !cb->wk_stop) {
 			if (TAILQ_WAIT(&write_evwc_tqh) != 0)
 				continue;
+		}
+		if (TAILQ_EMPTY(&write_evwc_tqh)) {	/* asked to stop */
+			TAILQ_UNLOCK(&write_evwc_tqh);
+			break;
 		}
 
 		evwc = TAILQ_FIRST(&write_evwc_tqh);
@@ -1451,6 +1463,64 @@ cq_worker_write(void *arg)
 	pthread_exit(NULL);
 }
 
+/*
+ * Stop and join the completion workers of one cb, then release the event
+ * pool. Must run after the cq master thread has been stopped and before the
+ * cb is freed: workers keep a pointer to their cb and would otherwise outlive
+ * it and also pick up the events of the next transfer.
+ */
+void
+cq_workers_stop(struct rdma_cb *cb)
+{
+	int i;
+	struct timespec dl;
+	EVENTWC *item;
+
+	if (cb == NULL || cb->wk_tids == NULL)
+		return;
+
+	cb->wk_stop = 1;
+
+	/* take each queue lock so a worker can not miss the wake up */
+	TAILQ_LOCK(&send_evwc_tqh);
+	pthread_cond_broadcast(&send_evwc_tqh.cond);
+	TAILQ_UNLOCK(&send_evwc_tqh);
+	TAILQ_LOCK(&recv_evwc_tqh);
+	pthread_cond_broadcast(&recv_evwc_tqh.cond);
+	TAILQ_UNLOCK(&recv_evwc_tqh);
+	TAILQ_LOCK(&write_evwc_tqh);
+	pthread_cond_broadcast(&write_evwc_tqh.cond);
+	TAILQ_UNLOCK(&write_evwc_tqh);
+
+	for (i = 0; i < cb->wk_num; i++) {
+		clock_gettime(CLOCK_REALTIME, &dl);
+		dl.tv_sec += 5;
+		if (pthread_timedjoin_np(cb->wk_tids[i], NULL, &dl) != 0) {
+			/* stuck in a handler: do not hang the whole session */
+			syslog(LOG_ERR, "cq worker %d did not stop, cancel", i);
+			pthread_cancel(cb->wk_tids[i]);
+			pthread_join(cb->wk_tids[i], NULL);
+		}
+	}
+
+	free(cb->wk_tids);
+	cb->wk_tids = NULL;
+	cb->wk_num = 0;
+
+	/* the next transfer builds a new event pool */
+#define DRAIN_EVWC(head)						\
+	while (!TAILQ_EMPTY(head)) {					\
+		item = TAILQ_FIRST(head);				\
+		TAILQ_REMOVE(head, item, entries);			\
+		free(item);						\
+	}
+	DRAIN_EVWC(&free_evwc_tqh);
+	DRAIN_EVWC(&send_evwc_tqh);
+	DRAIN_EVWC(&recv_evwc_tqh);
+	DRAIN_EVWC(&write_evwc_tqh);
+#undef DRAIN_EVWC
+}
+
 void *cq_thread(void *arg)
 {
 	struct rdma_cb *cb = arg;
@@ -1458,7 +1528,6 @@ void *cq_thread(void *arg)
 	void *ev_ctx;
 	int ret;
 	int i;
-	pthread_t tid;
 	EVENTWC *item;
 
 	syslog(LOG_ERR, "cq master thread tid: %d\n", gettid());
@@ -1474,25 +1543,39 @@ void *cq_thread(void *arg)
 		TAILQ_INSERT_TAIL(&free_evwc_tqh, item, entries);
 	}
 
-	/* create worker */
+	/*
+	 * create workers; they belong to this cb and are stopped and joined
+	 * by cq_workers_stop() before the cb is freed
+	 */
+	cb->wk_stop = 0;
+	cb->wk_num = 0;
+	cb->wk_tids = calloc(3 * (size_t) opt.wc_thread_num, sizeof(pthread_t));
+	if (cb->wk_tids == NULL) {
+		syslog(LOG_ERR, "cq_thread: calloc fail");
+		exit(EXIT_FAILURE);
+	}
+
 	for (i = 0; i < opt.wc_thread_num; i++) {
-		ret = pthread_create(&tid, NULL, cq_worker_send, cb);
+		ret = pthread_create(&cb->wk_tids[cb->wk_num], NULL, cq_worker_send, cb);
 		if (ret != 0) {
 			syslog(LOG_ERR, "create cq_worker_send fail %m");
 			exit(EXIT_FAILURE);
 		}
+		cb->wk_num++;
 
-		ret = pthread_create(&tid, NULL, cq_worker_recv, cb);
+		ret = pthread_create(&cb->wk_tids[cb->wk_num], NULL, cq_worker_recv, cb);
 		if (ret != 0) {
 			syslog(LOG_ERR, "create cq_worker_recv fail");
 			exit(EXIT_FAILURE);
 		}
+		cb->wk_num++;
 
-		ret = pthread_create(&tid, NULL, cq_worker_write, cb);
+		ret = pthread_create(&cb->wk_tids[cb->wk_num], NULL, cq_worker_write, cb);
 		if (ret != 0) {
 			syslog(LOG_ERR, "create cq_worker_write fail");
 			exit(EXIT_FAILURE);
 		}
+		cb->wk_num++;
 	}
 
 	while (1) {

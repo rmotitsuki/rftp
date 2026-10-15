@@ -1850,6 +1850,7 @@ static int rdmadataconn(const char *name, off_t size, const char *mode)
 err3:
 	pthread_cancel(dc_cb->cqthread);
 	pthread_join(dc_cb->cqthread, NULL);
+	cq_workers_stop(dc_cb);
 err2:
 	iperf_free_buffers(dc_cb);
 err1:
@@ -2095,6 +2096,7 @@ static void rsend_data(FILE *instr, FILE *outstr, off_t blksize, off_t filesize,
 		
 		pthread_cancel(dc_cb->cqthread);
 		pthread_join(dc_cb->cqthread, NULL);
+		cq_workers_stop(dc_cb);
 		syslog(LOG_ERR, "pthread_join cqthread success");
 		
 		pthread_cancel(dc_cb->cmthread);
@@ -2323,6 +2325,7 @@ static int rreceive_data(FILE *outstr)
 		
 		pthread_cancel(dc_cb->cqthread);
 		pthread_join(dc_cb->cqthread, NULL);
+		cq_workers_stop(dc_cb);
 		syslog(LOG_ERR, "pthread_join cqthread success");
 		
 		pthread_cancel(dc_cb->cmthread);

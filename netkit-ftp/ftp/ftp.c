@@ -1220,6 +1220,7 @@ rdmasendrequest(const char *cmd, char *local, char *remote, int printnames)
 	
 	pthread_cancel(child_dc_cb->cqthread);
 	pthread_join(child_dc_cb->cqthread, NULL);
+	cq_workers_stop(child_dc_cb);
 	DPRINTF(("pthread_join cqthread success\n"));
 	
 	pthread_cancel(child_dc_cb->cmthread);
@@ -2096,6 +2097,7 @@ rdmarecvrequest(const char *cmd,
 	
 	pthread_cancel(child_dc_cb->cqthread);
 	pthread_join(child_dc_cb->cqthread, NULL);
+	cq_workers_stop(child_dc_cb);
 	DPRINTF(("pthread_join cqthread success\n"));
 	
 	pthread_cancel(child_dc_cb->cmthread);
@@ -2525,6 +2527,7 @@ rdmadataconn(const char *lmode)
 err3:
 	pthread_cancel(child_dc_cb->cqthread);
 	pthread_join(child_dc_cb->cqthread, NULL);
+	cq_workers_stop(child_dc_cb);
 err2:
 	iperf_free_buffers(child_dc_cb);
 err1:

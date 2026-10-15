@@ -348,6 +348,9 @@ extern struct Fileinfo_head finfo_tqh;
 typedef struct rdma_cb {
 	int server;			/* 0 if client */
 	pthread_t cqthread;
+	pthread_t *wk_tids;		/* completion workers owned by this cb */
+	int wk_num;
+	volatile int wk_stop;		/* ask the workers to finish */
 	struct ibv_comp_channel *channel;
 	struct ibv_cq *cq;
 	struct ibv_pd *pd;
@@ -528,6 +531,7 @@ void parsedir(const char *dir);
 void parsepath(const char *local, const char *remote);
 
 void finfo_reset(void);
+void cq_workers_stop(struct rdma_cb *cb);
 void dc_conn_req(struct rdma_cb *cb);
 
 #ifdef __cplusplus
