@@ -114,8 +114,8 @@ extern "C" {
 
 typedef uint64_t max_size_t;
 
-max_size_t transtotallen;		/* totally trans data */
-max_size_t transcurrlen;
+extern max_size_t transtotallen;		/* totally trans data */
+extern max_size_t transcurrlen;
 
 struct options {
 	int    cbufnum;

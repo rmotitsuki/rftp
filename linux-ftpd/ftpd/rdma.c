@@ -93,6 +93,36 @@
 #include "errors.h"
 #include "utils.h"
 
+/* global list heads (declared extern in rdma.h) */
+struct Bufdatblk_head free_tqh;
+struct Bufdatblk_head sender_tqh;
+struct Bufdatblk_head writer_tqh;
+struct Bufdatblk_head waiting_tqh;
+struct Remoteaddr_head free_rmtaddr_tqh;
+struct Remoteaddr_head rmtaddr_tqh;
+struct Eventwr_head free_evwr_tqh;
+struct Eventwr_head evwr_tqh;
+struct Eventwc_head free_evwc_tqh;
+struct Eventwc_head send_evwc_tqh;
+struct Eventwc_head recv_evwc_tqh;
+struct Eventwc_head write_evwc_tqh;
+struct Recvwr_head recvwr_tqh;
+struct Dataqp_head dcqp_tqh;
+struct Rcinfo_head rcif_tqh;
+struct Fileinfo_head schedule_tqh;
+struct Fileinfo_head finfo_tqh;
+
+/* posix_memalign() into a char * without type-punning through char ** */
+static int rftp_memalign(char **out, size_t align, size_t size)
+{
+	void *p = NULL;
+	int r = posix_memalign(&p, align, size);
+
+	if (r == 0)
+		*out = (char *) p;
+	return r;
+}
+
 #include <sys/syscall.h>
 pid_t gettid()
 {
@@ -1769,7 +1799,7 @@ int tsf_setup_buf_list(struct rdma_cb *cb)
 				return -1;
 			}
 		} else {
-			if ( posix_memalign(&item->rdma_buf, getpagesize(), opt.cbufsiz + sizeof(rmsgheader)) != 0 ) {
+			if ( rftp_memalign(&item->rdma_buf, getpagesize(), opt.cbufsiz + sizeof(rmsgheader)) != 0 ) {
 			        syslog(LOG_ERR, "tsf_setup_buf_list: memalign fail");
 				return -1;
 			}
@@ -3098,7 +3128,7 @@ tcp_sender(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	if (posix_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
+	if (rftp_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
 		syslog(LOG_ERR, "memory align fail: %d(%s)", \
 			errno, strerror(errno));
 		exit(EXIT_FAILURE);
@@ -3240,7 +3270,7 @@ tcp_recver(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	if (posix_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
+	if (rftp_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
 		syslog(LOG_ERR, "memory align fail: %d(%s)", \
 			errno, strerror(errno));
 		exit(EXIT_FAILURE);
@@ -3620,7 +3650,7 @@ dc_conn_req(struct rdma_cb *cb)
 	/* compose send request - DC_CONNECTION_REQ */
 	evwr->ev_buf.mode = kRdmaTrans_ActWrte;
 	evwr->ev_buf.stat = DC_CONNECTION_REQ;
-	strncpy(evwr->ev_buf.addr, &opt.rcstreamnum, 4);
+	memcpy(evwr->ev_buf.addr, &opt.rcstreamnum, 4);
 	memcpy(evwr->ev_buf.addr + 4, &opt.data_addr_num, 4);
 	for (i = 0; i < opt.data_addr_num; i ++) {
 	  memset(str, '\0', INET6_ADDRSTRLEN);

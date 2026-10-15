@@ -49,6 +49,9 @@
 
 #include "utils.h"
 
+max_size_t transtotallen;	/* totally trans data */
+max_size_t transcurrlen;
+
 const long kKilo_to_Unit = 1024;
 const long kMega_to_Unit = 1024 * 1024;
 const long kGiga_to_Unit = 1024 * 1024 * 1024;
