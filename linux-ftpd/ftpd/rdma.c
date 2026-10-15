@@ -3053,6 +3053,10 @@ scheduler(void *arg)
 	struct ibv_send_wr *bad_wr;
 	
 	item = TAILQ_FIRST(&finfo_tqh);
+	if (item == NULL) {	/* nothing to negotiate */
+		syslog(LOG_ERR, "scheduler: no file to send");
+		pthread_exit(NULL);
+	}
 	
 	do {
 		next = TAILQ_NEXT(item, entries);
@@ -3393,6 +3397,24 @@ parsedir(const char *dir)
 	return;
 }
 
+/*
+ * Drop file entries left over from a previous command that failed or was
+ * aborted before the scheduler consumed them.
+ */
+void
+finfo_reset(void)
+{
+	FILEINFO *item;
+
+	TAILQ_LOCK(&finfo_tqh);
+	while (!TAILQ_EMPTY(&finfo_tqh)) {
+		item = TAILQ_FIRST(&finfo_tqh);
+		TAILQ_REMOVE(&finfo_tqh, item, entries);
+		free(item);
+	}
+	TAILQ_UNLOCK(&finfo_tqh);
+}
+
 void
 parsepath(const char *local, const char *remote)
 {
@@ -3405,6 +3427,7 @@ parsepath(const char *local, const char *remote)
 	if (stat(local, &st) != 0) {
 		syslog(LOG_ERR, "lstat fail: %d(%s)", \
 			errno, strerror(errno));
+		fprintf(stderr, "local: %s: %s\n", local, strerror(errno));
 		return;
 	}
 	
@@ -3479,12 +3502,16 @@ parsepath(const char *local, const char *remote)
 		TAILQ_INSERT_TAIL(&finfo_tqh, item, entries);
 	} else if (S_ISBLK(st.st_mode)) {
 		syslog(LOG_ERR, "IS BLK Device\n");
+		fprintf(stderr, "local: %s: block devices are not supported\n", local);
 	} else if (S_ISLNK(st.st_mode)) {
 		syslog(LOG_ERR, "IS LNK\n");
+		fprintf(stderr, "local: %s: symbolic link not supported\n", local);
 	} else if (S_ISSOCK(st.st_mode)) {
 		syslog(LOG_ERR, "IS SOCK\n");
+		fprintf(stderr, "local: %s: sockets are not supported\n", local);
 	} else {
 		syslog(LOG_ERR, "unknown file type\n");
+		fprintf(stderr, "local: %s: unsupported file type\n", local);
 	}
 	
 	return;

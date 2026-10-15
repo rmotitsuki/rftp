@@ -1165,6 +1165,10 @@ void rretrieve(const char *cmd, const char *name)
 	TAILQ_INIT(&rcif_tqh);
 	
 	parsepath(name, name);
+	if (TAILQ_EMPTY(&finfo_tqh)) {
+		reply(550, "%s: no regular file or directory to send.", name);
+		return;
+	}
 
 	/* establish data connection */
 	ret = rdmadataconn(name, st.st_size, "w");
@@ -1758,7 +1762,11 @@ static int rdmadataconn(const char *name, off_t size, const char *mode)
 	}
 	
 	memset(dc_cb, '\0', sizeof(rdma_cb));
-	rdma_cb_init(dc_cb);
+	if (rdma_cb_init(dc_cb) != 0) {	/* it already freed dc_cb */
+		dc_cb = NULL;
+		reply(425, "Can't open RDMA data connection.");
+		return (1);
+	}
 	
 	dc_cb->size = opt.cbufsiz;
 	dc_cb->server = 0;

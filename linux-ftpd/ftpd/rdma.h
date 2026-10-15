@@ -527,6 +527,7 @@ void parsedir(const char *dir);
 /* data source */
 void parsepath(const char *local, const char *remote);
 
+void finfo_reset(void);
 void dc_conn_req(struct rdma_cb *cb);
 
 #ifdef __cplusplus

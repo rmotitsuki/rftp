@@ -2355,7 +2355,10 @@ noport:
 	}
 	
 	memset(dc_cb, '\0', sizeof(rdma_cb));
-	rdma_cb_init(dc_cb);
+	if (rdma_cb_init(dc_cb) != 0) {	/* it already freed dc_cb */
+		dc_cb = NULL;
+		return(1);
+	}
 	
 	sem_init(&dc_cb->sem, 0, 0);
 	
@@ -2469,7 +2472,10 @@ rdmadataconn(const char *lmode)
 	
 	memset(child_dc_cb, '\0', sizeof(rdma_cb));
 	
-	rdma_cb_init(child_dc_cb);
+	if (rdma_cb_init(child_dc_cb) != 0) {	/* it already freed child_dc_cb */
+		child_dc_cb = NULL;
+		goto err0;
+	}
 	
 	child_dc_cb->size = opt.cbufsiz;
 	child_dc_cb->server = 1;
