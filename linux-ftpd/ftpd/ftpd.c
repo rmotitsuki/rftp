@@ -2293,7 +2293,7 @@ static int rreceive_data(FILE *outstr)
 			if (is_disconnected_event == 1)
 				break;
 
-			sleep(1);
+			usleep(1000);
 		}
 
 		clock_gettime(CLOCK_REALTIME, &ts);

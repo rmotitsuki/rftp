@@ -316,9 +316,27 @@ anabw(void *arg)
 	int banlen = 30;
 	int i;
 	
+	struct timespec tprev, tnow;
+	double dt;
+
+	clock_gettime(CLOCK_MONOTONIC, &tprev);
+
 	for ( ; transcurrlen < transtotallen; ) {
-		sleep(1);
-		trans = (transcurrlen - prelen) * 8;
+		/*
+		 * Poll finely so the end of the transfer is noticed (and the
+		 * caller's stop time taken) right away instead of up to one
+		 * second late; only print once per second of real time.
+		 */
+		do {
+			usleep(5000);
+			clock_gettime(CLOCK_MONOTONIC, &tnow);
+			dt = (tnow.tv_sec - tprev.tv_sec)
+			   + (tnow.tv_nsec - tprev.tv_nsec) / 1e9;
+		} while (dt < 1.0 && transcurrlen < transtotallen);
+		tprev = tnow;
+		if (dt <= 0)
+			dt = 1e-9;
+		trans = (long) ((transcurrlen - prelen) * 8 / dt);
 		
 		/* percentage */
 		percent = (double) transcurrlen / (double) transtotallen;
