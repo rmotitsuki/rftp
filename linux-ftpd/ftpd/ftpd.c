@@ -50,7 +50,9 @@ char copyright[] =
  */
 
 #ifdef __linux__
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #endif
 
 #include <sys/types.h>
@@ -936,7 +938,10 @@ if (strcmp(pw->pw_name, "ftp") != 0) {
 	/* open utmp before chroot */
 	if (doutmp) {
 		memset((void *)&utmp, 0, sizeof(utmp));
-		(void)time(&utmp.ut_time);
+		{
+			time_t now = time(NULL);
+			utmp.ut_time = now;
+		}
 		(void)strncpy(utmp.ut_name, pw->pw_name, sizeof(utmp.ut_name));
 		(void)strncpy(utmp.ut_host, remotehost, sizeof(utmp.ut_host));
 		(void)strncpy(utmp.ut_line, ttyline, sizeof(utmp.ut_line));
@@ -1135,6 +1140,10 @@ void rretrieve(const char *cmd, const char *name)
 	time_t start;
 	int ret;
 
+	/* no stat() is done on the RDMA path: use neutral values, size unknown */
+	memset(&st, 0, sizeof(st));
+	st.st_size = (off_t) -1;
+
 	TAILQ_INIT(&free_tqh);
 	TAILQ_INIT(&sender_tqh);
 	TAILQ_INIT(&writer_tqh);
@@ -1154,8 +1163,17 @@ void rretrieve(const char *cmd, const char *name)
 	TAILQ_INIT(&finfo_tqh);
 	
 	TAILQ_INIT(&rcif_tqh);
+
+	/* per-transfer counters: the child process serves many transfers */
+	transcurrlen = transtotallen = 0;
+	is_disconnected_event = 0;
+	rdma_state_reset();
 	
 	parsepath(name, name);
+	if (TAILQ_EMPTY(&finfo_tqh)) {
+		reply(550, "%s: no regular file or directory to send.", name);
+		return;
+	}
 
 	/* establish data connection */
 	ret = rdmadataconn(name, st.st_size, "w");
@@ -1208,21 +1226,21 @@ void mretrieve(const char *cmd, const char *name, int conn_number)
 			reply(425, "Can't open data connection.");
 			(void) close(pdata);
 			pdata = -1;
-			return (NULL);
+			return;
 		}
 		if (ntohs(from.sin_port) < IPPORT_RESERVED) {
 			perror_reply(425, "Can't build data connection");
 			(void) close(pdata);
 			(void) close(conns[i]);
 			pdata = -1;
-			return (NULL);
+			return;
 		}
 		if (from.sin_addr.s_addr != his_addr.sin_addr.s_addr) {
 			perror_reply(435, "Can't build data connection"); 
 			(void) close(pdata);
 			(void) close(conns[i]);
 			pdata = -1;
-			return (NULL);
+			return;
 		}
 		
 		ret = pthread_create(&sender_tid[i], NULL, \
@@ -1328,7 +1346,7 @@ done:
 
 void rstore(const char *name, const char *mode, int unique)
 {
-	FILE *fout, *din;
+	FILE *fout = NULL, *din;
 	int (*closefunc) __P((FILE *));
 	struct stat st;
 	int fd;
@@ -1353,6 +1371,11 @@ void rstore(const char *name, const char *mode, int unique)
 	TAILQ_INIT(&finfo_tqh);
 	
 	TAILQ_INIT(&rcif_tqh);
+
+	/* per-transfer counters: the child process serves many transfers */
+	transcurrlen = transtotallen = 0;
+	is_disconnected_event = 0;
+	rdma_state_reset();
 	
 	if (unique && stat(name, &st) == 0) {
 		char *nam;
@@ -1366,17 +1389,18 @@ void rstore(const char *name, const char *mode, int unique)
 		if (restart_point)
 			mode = "r+";
 		fout = fdopen(fd, mode);
+		if (fout == NULL) {
+			perror_reply(553, name);
+			LOGCMD(*mode == 'w' ? "put" : "append", name);
+			return;
+		}
 	} /* else
 		fout = fopen(name, mode); */
 
 	closefunc = fclose;
-	if (fout == NULL) {
-		perror_reply(553, name);
-		LOGCMD(*mode == 'w' ? "put" : "append", name);
-		return;
-	}
 	byte_count = -1;
-	if (restart_point) {
+	/* fout only exists for unique names; the RDMA writers open the file */
+	if (restart_point && fout != NULL) {
 		if (type == TYPE_A) {
 			off_t i, n;
 			int c;
@@ -1457,21 +1481,21 @@ void mstore(const char *name, const char *mode, int unique)
 			reply(425, "Can't open data connection.");
 			(void) close(pdata);
 			pdata = -1;
-			return (NULL);
+			return;
 		}
 		if (ntohs(from.sin_port) < IPPORT_RESERVED) {
 			perror_reply(425, "Can't build data connection");
 			(void) close(pdata);
 			(void) close(conns[i]);
 			pdata = -1;
-			return (NULL);
+			return;
 		}
 		if (from.sin_addr.s_addr != his_addr.sin_addr.s_addr) {
 			perror_reply(435, "Can't build data connection"); 
 			(void) close(pdata);
 			(void) close(conns[i]);
 			pdata = -1;
-			return (NULL);
+			return;
 		}
 		
 		ret = pthread_create(&recver_tid[i], NULL, \
@@ -1677,7 +1701,6 @@ static FILE * dataconn(const char *name, off_t size, const char *mode)
 static int rdmadataconn(const char *name, off_t size, const char *mode)
 {
 	char sizebuf[32];
-	FILE *file;
 	int retry = 0, tos;
 	
 	struct ibv_send_wr *bad_send_wr;
@@ -1704,21 +1727,21 @@ static int rdmadataconn(const char *name, off_t size, const char *mode)
 			reply(425, "Can't open data connection.");
 			(void) close(pdata);
 			pdata = -1;
-			return (NULL);
+			return (1);
 		}
 		if (ntohs(from.sin_port) < IPPORT_RESERVED) {
 			perror_reply(425, "Can't build data connection");
 			(void) close(pdata);
 			(void) close(s);
 			pdata = -1;
-			return (NULL);
+			return (1);
 		}
 		if (from.sin_addr.s_addr != his_addr.sin_addr.s_addr) {
 			perror_reply(435, "Can't build data connection"); 
 			(void) close(pdata);
 			(void) close(s);
 			pdata = -1;
-			return (NULL);
+			return (1);
 		}
 		(void) close(pdata);
 		pdata = s;
@@ -1727,15 +1750,16 @@ static int rdmadataconn(const char *name, off_t size, const char *mode)
 		(void) setsockopt(s, IPPROTO_IP, IP_TOS, (char *)&tos,
 		    sizeof(int));
 #endif
-		reply(150, "Opening %s mode data connection for '%s'%s.",
-		     type == TYPE_A ? "ASCII" : "BINARY", name, sizebuf);
-		return (fdopen(pdata, mode));
+		/* passive TCP data connection can not carry an RDMA transfer */
+		reply(425, "Can't open data connection.");
+		(void) close(pdata);
+		pdata = -1;
+		return (1);
 	}
 	if (data >= 0) {
-		reply(125, "Using existing data connection for '%s'%s.",
-		    name, sizebuf);
-		usedefault = 1;
-		return (fdopen(data, mode));
+		/* existing TCP data connection can not carry an RDMA transfer */
+		reply(425, "Can't open data connection.");
+		return (1);
 	}
 	if (usedefault)
 		data_dest = his_addr;
@@ -1744,11 +1768,15 @@ static int rdmadataconn(const char *name, off_t size, const char *mode)
 	dc_cb = (rdma_cb *) malloc(sizeof(rdma_cb));
 	if (dc_cb == NULL) {
 		syslog(LOG_ERR, "malloc: %m");
-		return(NULL);
+		return (1);
 	}
 	
 	memset(dc_cb, '\0', sizeof(rdma_cb));
-	rdma_cb_init(dc_cb);
+	if (rdma_cb_init(dc_cb) != 0) {	/* it already freed dc_cb */
+		dc_cb = NULL;
+		reply(425, "Can't open RDMA data connection.");
+		return (1);
+	}
 	
 	dc_cb->size = opt.cbufsiz;
 	dc_cb->server = 0;
@@ -1762,29 +1790,27 @@ static int rdmadataconn(const char *name, off_t size, const char *mode)
 	if (ntohs(data_dest.sin_port) < IPPORT_RESERVED ||
 	    ntohs(data_dest.sin_port) == 2049) {		/* XXX */
 		perror_reply(425, "Can't build data connection");
-		(void) fclose(file);
 		data = -1;
-		return NULL;
+		return (1);
 	}
 	if (data_dest.sin_addr.s_addr != his_addr.sin_addr.s_addr) {
 		perror_reply(435, "Can't build data connection");
-		(void) fclose(file);
 		data = -1;
-		return NULL;
+		return (1);
 	}
 	
 	ret = rdma_resolve_addr(dc_cb->cm_id, NULL, \
 		(struct sockaddr *) &data_dest, 2000);
 	if (ret) {
 		syslog(LOG_ERR, "rdma_resolve_addr: %m");
-		return;
+		return (1);
 	}
 	
 	sem_wait(&dc_cb->sem);
 	if (dc_cb->state != ROUTE_RESOLVED) {
 		syslog(LOG_ERR, "waiting for addr/route resolution state %d\n", 
 			dc_cb->state);
-		return;
+		return (1);
 	}
 	
 	ret = iperf_setup_qp(dc_cb, dc_cb->cm_id);
@@ -1834,6 +1860,7 @@ static int rdmadataconn(const char *name, off_t size, const char *mode)
 err3:
 	pthread_cancel(dc_cb->cqthread);
 	pthread_join(dc_cb->cqthread, NULL);
+	cq_workers_stop(dc_cb);
 err2:
 	iperf_free_buffers(dc_cb);
 err1:
@@ -1849,9 +1876,8 @@ err0:
 			continue;
 		}
 		perror_reply(425, "Can't build data connection");
-		(void) fclose(file);
 		data = -1;
-		return (NULL);
+		return (1);
 	} */
 	
 }
@@ -2080,6 +2106,7 @@ static void rsend_data(FILE *instr, FILE *outstr, off_t blksize, off_t filesize,
 		
 		pthread_cancel(dc_cb->cqthread);
 		pthread_join(dc_cb->cqthread, NULL);
+		cq_workers_stop(dc_cb);
 		syslog(LOG_ERR, "pthread_join cqthread success");
 		
 		pthread_cancel(dc_cb->cmthread);
@@ -2279,8 +2306,10 @@ static int rreceive_data(FILE *outstr)
 
 		for (i = 0; i < opt.writernum; i ++) {
 			pthread_cancel(writer_tid[i]);
+			pthread_join(writer_tid[i], NULL);
 			syslog(LOG_ERR, "cancel writer[%d] success", i);
 		}
+		finfo_close_all();
 		
 		/* release the connected rdma_cm_id */
 		/* cq_thread - cm_thread */
@@ -2308,6 +2337,7 @@ static int rreceive_data(FILE *outstr)
 		
 		pthread_cancel(dc_cb->cqthread);
 		pthread_join(dc_cb->cqthread, NULL);
+		cq_workers_stop(dc_cb);
 		syslog(LOG_ERR, "pthread_join cqthread success");
 		
 		pthread_cancel(dc_cb->cmthread);

@@ -1220,6 +1220,7 @@ rdmasendrequest(const char *cmd, char *local, char *remote, int printnames)
 	
 	pthread_cancel(child_dc_cb->cqthread);
 	pthread_join(child_dc_cb->cqthread, NULL);
+	cq_workers_stop(child_dc_cb);
 	DPRINTF(("pthread_join cqthread success\n"));
 	
 	pthread_cancel(child_dc_cb->cmthread);
@@ -2096,6 +2097,7 @@ rdmarecvrequest(const char *cmd,
 	
 	pthread_cancel(child_dc_cb->cqthread);
 	pthread_join(child_dc_cb->cqthread, NULL);
+	cq_workers_stop(child_dc_cb);
 	DPRINTF(("pthread_join cqthread success\n"));
 	
 	pthread_cancel(child_dc_cb->cmthread);
@@ -2355,7 +2357,10 @@ noport:
 	}
 	
 	memset(dc_cb, '\0', sizeof(rdma_cb));
-	rdma_cb_init(dc_cb);
+	if (rdma_cb_init(dc_cb) != 0) {	/* it already freed dc_cb */
+		dc_cb = NULL;
+		return(1);
+	}
 	
 	sem_init(&dc_cb->sem, 0, 0);
 	
@@ -2469,7 +2474,10 @@ rdmadataconn(const char *lmode)
 	
 	memset(child_dc_cb, '\0', sizeof(rdma_cb));
 	
-	rdma_cb_init(child_dc_cb);
+	if (rdma_cb_init(child_dc_cb) != 0) {	/* it already freed child_dc_cb */
+		child_dc_cb = NULL;
+		goto err0;
+	}
 	
 	child_dc_cb->size = opt.cbufsiz;
 	child_dc_cb->server = 1;
@@ -2519,6 +2527,7 @@ rdmadataconn(const char *lmode)
 err3:
 	pthread_cancel(child_dc_cb->cqthread);
 	pthread_join(child_dc_cb->cqthread, NULL);
+	cq_workers_stop(child_dc_cb);
 err2:
 	iperf_free_buffers(child_dc_cb);
 err1:

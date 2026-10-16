@@ -93,6 +93,36 @@
 #include "errors.h"
 #include "utils.h"
 
+/* global list heads (declared extern in rdma.h) */
+struct Bufdatblk_head free_tqh;
+struct Bufdatblk_head sender_tqh;
+struct Bufdatblk_head writer_tqh;
+struct Bufdatblk_head waiting_tqh;
+struct Remoteaddr_head free_rmtaddr_tqh;
+struct Remoteaddr_head rmtaddr_tqh;
+struct Eventwr_head free_evwr_tqh;
+struct Eventwr_head evwr_tqh;
+struct Eventwc_head free_evwc_tqh;
+struct Eventwc_head send_evwc_tqh;
+struct Eventwc_head recv_evwc_tqh;
+struct Eventwc_head write_evwc_tqh;
+struct Recvwr_head recvwr_tqh;
+struct Dataqp_head dcqp_tqh;
+struct Rcinfo_head rcif_tqh;
+struct Fileinfo_head schedule_tqh;
+struct Fileinfo_head finfo_tqh;
+
+/* posix_memalign() into a char * without type-punning through char ** */
+static int rftp_memalign(char **out, size_t align, size_t size)
+{
+	void *p = NULL;
+	int r = posix_memalign(&p, align, size);
+
+	if (r == 0)
+		*out = (char *) p;
+	return r;
+}
+
 #include <sys/syscall.h>
 pid_t gettid()
 {
@@ -1325,12 +1355,16 @@ cq_worker_send(void *arg)
 	for ( ; ; ) {
 		/* get wc from wc list */
 		TAILQ_LOCK(&send_evwc_tqh);
-		while (TAILQ_EMPTY(&send_evwc_tqh)) {
+		while (TAILQ_EMPTY(&send_evwc_tqh) && !cb->wk_stop) {
 			if ((ret = TAILQ_WAIT(&send_evwc_tqh)) != 0) {
 				syslog(LOG_ERR, "cq_worker_sender(%d): tailq wait fail: %d(%s)\n", \
 					gettid(), errno, strerror(errno));
 				continue;
 			}
+		}
+		if (TAILQ_EMPTY(&send_evwc_tqh)) {	/* asked to stop */
+			TAILQ_UNLOCK(&send_evwc_tqh);
+			break;
 		}
 
 		evwc = TAILQ_FIRST(&send_evwc_tqh);
@@ -1364,9 +1398,13 @@ cq_worker_recv(void *arg)
 	for ( ; ; ) {
 		/* get wc from wc list */
 		TAILQ_LOCK(&recv_evwc_tqh);
-		while (TAILQ_EMPTY(&recv_evwc_tqh)) {
+		while (TAILQ_EMPTY(&recv_evwc_tqh) && !cb->wk_stop) {
 			if (TAILQ_WAIT(&recv_evwc_tqh) != 0)
 				continue;
+		}
+		if (TAILQ_EMPTY(&recv_evwc_tqh)) {	/* asked to stop */
+			TAILQ_UNLOCK(&recv_evwc_tqh);
+			break;
 		}
 
 		evwc = TAILQ_FIRST(&recv_evwc_tqh);
@@ -1400,9 +1438,13 @@ cq_worker_write(void *arg)
 	for ( ; ; ) {
 		/* get wc from wc list */
 		TAILQ_LOCK(&write_evwc_tqh);
-		while (TAILQ_EMPTY(&write_evwc_tqh)) {
+		while (TAILQ_EMPTY(&write_evwc_tqh) && !cb->wk_stop) {
 			if (TAILQ_WAIT(&write_evwc_tqh) != 0)
 				continue;
+		}
+		if (TAILQ_EMPTY(&write_evwc_tqh)) {	/* asked to stop */
+			TAILQ_UNLOCK(&write_evwc_tqh);
+			break;
 		}
 
 		evwc = TAILQ_FIRST(&write_evwc_tqh);
@@ -1421,6 +1463,64 @@ cq_worker_write(void *arg)
 	pthread_exit(NULL);
 }
 
+/*
+ * Stop and join the completion workers of one cb, then release the event
+ * pool. Must run after the cq master thread has been stopped and before the
+ * cb is freed: workers keep a pointer to their cb and would otherwise outlive
+ * it and also pick up the events of the next transfer.
+ */
+void
+cq_workers_stop(struct rdma_cb *cb)
+{
+	int i;
+	struct timespec dl;
+	EVENTWC *item;
+
+	if (cb == NULL || cb->wk_tids == NULL)
+		return;
+
+	cb->wk_stop = 1;
+
+	/* take each queue lock so a worker can not miss the wake up */
+	TAILQ_LOCK(&send_evwc_tqh);
+	pthread_cond_broadcast(&send_evwc_tqh.cond);
+	TAILQ_UNLOCK(&send_evwc_tqh);
+	TAILQ_LOCK(&recv_evwc_tqh);
+	pthread_cond_broadcast(&recv_evwc_tqh.cond);
+	TAILQ_UNLOCK(&recv_evwc_tqh);
+	TAILQ_LOCK(&write_evwc_tqh);
+	pthread_cond_broadcast(&write_evwc_tqh.cond);
+	TAILQ_UNLOCK(&write_evwc_tqh);
+
+	for (i = 0; i < cb->wk_num; i++) {
+		clock_gettime(CLOCK_REALTIME, &dl);
+		dl.tv_sec += 5;
+		if (pthread_timedjoin_np(cb->wk_tids[i], NULL, &dl) != 0) {
+			/* stuck in a handler: do not hang the whole session */
+			syslog(LOG_ERR, "cq worker %d did not stop, cancel", i);
+			pthread_cancel(cb->wk_tids[i]);
+			pthread_join(cb->wk_tids[i], NULL);
+		}
+	}
+
+	free(cb->wk_tids);
+	cb->wk_tids = NULL;
+	cb->wk_num = 0;
+
+	/* the next transfer builds a new event pool */
+#define DRAIN_EVWC(head)						\
+	while (!TAILQ_EMPTY(head)) {					\
+		item = TAILQ_FIRST(head);				\
+		TAILQ_REMOVE(head, item, entries);			\
+		free(item);						\
+	}
+	DRAIN_EVWC(&free_evwc_tqh);
+	DRAIN_EVWC(&send_evwc_tqh);
+	DRAIN_EVWC(&recv_evwc_tqh);
+	DRAIN_EVWC(&write_evwc_tqh);
+#undef DRAIN_EVWC
+}
+
 void *cq_thread(void *arg)
 {
 	struct rdma_cb *cb = arg;
@@ -1428,7 +1528,6 @@ void *cq_thread(void *arg)
 	void *ev_ctx;
 	int ret;
 	int i;
-	pthread_t tid;
 	EVENTWC *item;
 
 	syslog(LOG_ERR, "cq master thread tid: %d\n", gettid());
@@ -1444,25 +1543,39 @@ void *cq_thread(void *arg)
 		TAILQ_INSERT_TAIL(&free_evwc_tqh, item, entries);
 	}
 
-	/* create worker */
+	/*
+	 * create workers; they belong to this cb and are stopped and joined
+	 * by cq_workers_stop() before the cb is freed
+	 */
+	cb->wk_stop = 0;
+	cb->wk_num = 0;
+	cb->wk_tids = calloc(3 * (size_t) opt.wc_thread_num, sizeof(pthread_t));
+	if (cb->wk_tids == NULL) {
+		syslog(LOG_ERR, "cq_thread: calloc fail");
+		exit(EXIT_FAILURE);
+	}
+
 	for (i = 0; i < opt.wc_thread_num; i++) {
-		ret = pthread_create(&tid, NULL, cq_worker_send, cb);
+		ret = pthread_create(&cb->wk_tids[cb->wk_num], NULL, cq_worker_send, cb);
 		if (ret != 0) {
 			syslog(LOG_ERR, "create cq_worker_send fail %m");
 			exit(EXIT_FAILURE);
 		}
+		cb->wk_num++;
 
-		ret = pthread_create(&tid, NULL, cq_worker_recv, cb);
+		ret = pthread_create(&cb->wk_tids[cb->wk_num], NULL, cq_worker_recv, cb);
 		if (ret != 0) {
 			syslog(LOG_ERR, "create cq_worker_recv fail");
 			exit(EXIT_FAILURE);
 		}
+		cb->wk_num++;
 
-		ret = pthread_create(&tid, NULL, cq_worker_write, cb);
+		ret = pthread_create(&cb->wk_tids[cb->wk_num], NULL, cq_worker_write, cb);
 		if (ret != 0) {
 			syslog(LOG_ERR, "create cq_worker_write fail");
 			exit(EXIT_FAILURE);
 		}
+		cb->wk_num++;
 	}
 
 	while (1) {
@@ -1769,7 +1882,7 @@ int tsf_setup_buf_list(struct rdma_cb *cb)
 				return -1;
 			}
 		} else {
-			if ( posix_memalign(&item->rdma_buf, getpagesize(), opt.cbufsiz + sizeof(rmsgheader)) != 0 ) {
+			if ( rftp_memalign(&item->rdma_buf, getpagesize(), opt.cbufsiz + sizeof(rmsgheader)) != 0 ) {
 			        syslog(LOG_ERR, "tsf_setup_buf_list: memalign fail");
 				return -1;
 			}
@@ -3023,6 +3136,10 @@ scheduler(void *arg)
 	struct ibv_send_wr *bad_wr;
 	
 	item = TAILQ_FIRST(&finfo_tqh);
+	if (item == NULL) {	/* nothing to negotiate */
+		syslog(LOG_ERR, "scheduler: no file to send");
+		pthread_exit(NULL);
+	}
 	
 	do {
 		next = TAILQ_NEXT(item, entries);
@@ -3098,7 +3215,7 @@ tcp_sender(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	if (posix_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
+	if (rftp_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
 		syslog(LOG_ERR, "memory align fail: %d(%s)", \
 			errno, strerror(errno));
 		exit(EXIT_FAILURE);
@@ -3240,7 +3357,7 @@ tcp_recver(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	if (posix_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
+	if (rftp_memalign(&buf, pgsz, opt.cbufsiz) != 0) {
 		syslog(LOG_ERR, "memory align fail: %d(%s)", \
 			errno, strerror(errno));
 		exit(EXIT_FAILURE);
@@ -3363,6 +3480,60 @@ parsedir(const char *dir)
 	return;
 }
 
+/*
+ * A previous transfer can end while a worker still holds (or was cancelled
+ * while holding) one of these static locks; a stale lock makes the next
+ * transfer silently ignore every block request.  Called with no transfer
+ * thread running.
+ */
+void
+rdma_state_reset(void)
+{
+	pthread_mutex_init(&rqblk_mutex, NULL);
+	pthread_mutex_init(&rqblk_once_mutex, NULL);
+}
+
+/*
+ * Receiver side: close the destination files of the finished transfer.
+ * Without this the descriptors (and, for a file deleted meanwhile, its
+ * space on tmpfs) leak for the lifetime of the session.
+ */
+void
+finfo_close_all(void)
+{
+	FILEINFO *item;
+
+	TAILQ_LOCK(&finfo_tqh);
+	while (!TAILQ_EMPTY(&finfo_tqh)) {
+		item = TAILQ_FIRST(&finfo_tqh);
+		TAILQ_REMOVE(&finfo_tqh, item, entries);
+		if (item->fd >= 0)
+			close(item->fd);
+		free(item);
+	}
+	TAILQ_UNLOCK(&finfo_tqh);
+}
+
+/*
+ * Drop file entries left over from a previous command that failed or was
+ * aborted before the scheduler consumed them.
+ */
+void
+finfo_reset(void)
+{
+	FILEINFO *item;
+
+	rdma_state_reset();
+
+	TAILQ_LOCK(&finfo_tqh);
+	while (!TAILQ_EMPTY(&finfo_tqh)) {
+		item = TAILQ_FIRST(&finfo_tqh);
+		TAILQ_REMOVE(&finfo_tqh, item, entries);
+		free(item);
+	}
+	TAILQ_UNLOCK(&finfo_tqh);
+}
+
 void
 parsepath(const char *local, const char *remote)
 {
@@ -3375,6 +3546,7 @@ parsepath(const char *local, const char *remote)
 	if (stat(local, &st) != 0) {
 		syslog(LOG_ERR, "lstat fail: %d(%s)", \
 			errno, strerror(errno));
+		fprintf(stderr, "local: %s: %s\n", local, strerror(errno));
 		return;
 	}
 	
@@ -3449,12 +3621,16 @@ parsepath(const char *local, const char *remote)
 		TAILQ_INSERT_TAIL(&finfo_tqh, item, entries);
 	} else if (S_ISBLK(st.st_mode)) {
 		syslog(LOG_ERR, "IS BLK Device\n");
+		fprintf(stderr, "local: %s: block devices are not supported\n", local);
 	} else if (S_ISLNK(st.st_mode)) {
 		syslog(LOG_ERR, "IS LNK\n");
+		fprintf(stderr, "local: %s: symbolic link not supported\n", local);
 	} else if (S_ISSOCK(st.st_mode)) {
 		syslog(LOG_ERR, "IS SOCK\n");
+		fprintf(stderr, "local: %s: sockets are not supported\n", local);
 	} else {
 		syslog(LOG_ERR, "unknown file type\n");
+		fprintf(stderr, "local: %s: unsupported file type\n", local);
 	}
 	
 	return;
@@ -3620,7 +3796,7 @@ dc_conn_req(struct rdma_cb *cb)
 	/* compose send request - DC_CONNECTION_REQ */
 	evwr->ev_buf.mode = kRdmaTrans_ActWrte;
 	evwr->ev_buf.stat = DC_CONNECTION_REQ;
-	strncpy(evwr->ev_buf.addr, &opt.rcstreamnum, 4);
+	memcpy(evwr->ev_buf.addr, &opt.rcstreamnum, 4);
 	memcpy(evwr->ev_buf.addr + 4, &opt.data_addr_num, 4);
 	for (i = 0; i < opt.data_addr_num; i ++) {
 	  memset(str, '\0', INET6_ADDRSTRLEN);

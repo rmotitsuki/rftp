@@ -59,9 +59,19 @@ extern "C" {
 #endif
 
 #include <rdma/rdma_cma.h>
-#include <infiniband/arch.h>
+#include <endian.h>
 
+/* infiniband/arch.h is obsolete in current rdma-core; only htonll/ntohll were used */
+#ifndef htonll
+#define htonll(x) htobe64(x)
+#endif
+#ifndef ntohll
+#define ntohll(x) be64toh(x)
+#endif
+
+#ifndef __USE_GNU
 #define __USE_GNU		/* for splice */
+#endif
 #include <fcntl.h>
 
 #include <semaphore.h>
@@ -254,7 +264,7 @@ struct Recvwr {
 	struct rdma_info_blk recv_buf;  /* single recv buf */
 	struct ibv_mr *recv_mr;		/* MR associated with this buffer */
 	
-	TAILQ_ENTRY(Eventwr) entries;
+	TAILQ_ENTRY(Recvwr) entries;
 };
 typedef struct Recvwr RECVWR;
 
@@ -290,38 +300,47 @@ typedef struct Rcinfo RCINFO;
 
 
 /* res */
+TAILQ_HEAD(Bufdatblk_head, Bufdatblk);
+TAILQ_HEAD(Dataqp_head, Dataqp);
+TAILQ_HEAD(Eventwc_head, Eventwc);
+TAILQ_HEAD(Eventwr_head, Eventwr);
+TAILQ_HEAD(Fileinfo_head, Fileinfo);
+TAILQ_HEAD(Rcinfo_head, Rcinfo);
+TAILQ_HEAD(Recvwr_head, Recvwr);
+TAILQ_HEAD(Remoteaddr_head, Remoteaddr);
+
 	/* free list, sender list, and writer list */
-TAILQ_HEAD(, Bufdatblk) 	free_tqh;
-TAILQ_HEAD(, Bufdatblk) 	sender_tqh;
-TAILQ_HEAD(, Bufdatblk) 	writer_tqh;
-TAILQ_HEAD(, Bufdatblk) 	waiting_tqh;
+extern struct Bufdatblk_head free_tqh;
+extern struct Bufdatblk_head sender_tqh;
+extern struct Bufdatblk_head writer_tqh;
+extern struct Bufdatblk_head waiting_tqh;
 
 	/* remote addr infor addr */
-TAILQ_HEAD(, Remoteaddr)	free_rmtaddr_tqh;
-TAILQ_HEAD(, Remoteaddr)	rmtaddr_tqh;
+extern struct Remoteaddr_head free_rmtaddr_tqh;
+extern struct Remoteaddr_head rmtaddr_tqh;
 
 	/* event work request addr */
-TAILQ_HEAD(, Eventwr)		free_evwr_tqh;
-TAILQ_HEAD(, Eventwr)		evwr_tqh;
+extern struct Eventwr_head free_evwr_tqh;
+extern struct Eventwr_head evwr_tqh;
 
 	/* work completion event */
-TAILQ_HEAD(, Eventwc)		free_evwc_tqh;
-TAILQ_HEAD(, Eventwc)		send_evwc_tqh;
-TAILQ_HEAD(, Eventwc)		recv_evwc_tqh;
-TAILQ_HEAD(, Eventwc)		write_evwc_tqh;
+extern struct Eventwc_head free_evwc_tqh;
+extern struct Eventwc_head send_evwc_tqh;
+extern struct Eventwc_head recv_evwc_tqh;
+extern struct Eventwc_head write_evwc_tqh;
 
 	/* event work request addr */
-TAILQ_HEAD(, Recvwr)		recvwr_tqh;
+extern struct Recvwr_head recvwr_tqh;
 
 	/* queue pair list */
-TAILQ_HEAD(, Dataqp)		dcqp_tqh;
+extern struct Dataqp_head dcqp_tqh;
 
 	/* RC stream list */
-TAILQ_HEAD(, Rcinfo)		rcif_tqh;
+extern struct Rcinfo_head rcif_tqh;
 
 	/* multiple file list */
-TAILQ_HEAD(, Fileinfo) 		schedule_tqh;
-TAILQ_HEAD(, Fileinfo)		finfo_tqh;
+extern struct Fileinfo_head schedule_tqh;
+extern struct Fileinfo_head finfo_tqh;
 
 /*
  * RDMA Control block struct.
@@ -329,6 +348,9 @@ TAILQ_HEAD(, Fileinfo)		finfo_tqh;
 typedef struct rdma_cb {
 	int server;			/* 0 if client */
 	pthread_t cqthread;
+	pthread_t *wk_tids;		/* completion workers owned by this cb */
+	int wk_num;
+	volatile int wk_stop;		/* ask the workers to finish */
 	struct ibv_comp_channel *channel;
 	struct ibv_cq *cq;
 	struct ibv_pd *pd;
@@ -508,6 +530,10 @@ void parsedir(const char *dir);
 /* data source */
 void parsepath(const char *local, const char *remote);
 
+void finfo_reset(void);
+void rdma_state_reset(void);
+void finfo_close_all(void);
+void cq_workers_stop(struct rdma_cb *cb);
 void dc_conn_req(struct rdma_cb *cb);
 
 #ifdef __cplusplus

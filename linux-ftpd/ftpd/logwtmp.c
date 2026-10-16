@@ -49,6 +49,7 @@ char logwtmp_rcsid[] =
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "extern.h"
 
 static int fd = -1;
@@ -75,7 +76,7 @@ ftpdlogwtmp(const char *line, const char *name, const char *host)
 		(void)strncpy(ut.ut_line, line, sizeof(ut.ut_line));
 		(void)strncpy(ut.ut_name, name, sizeof(ut.ut_name));
 		(void)strncpy(ut.ut_host, host, sizeof(ut.ut_host));
-		(void)time(&ut.ut_time);
+		ut.ut_time = time(NULL);
 		if (write(fd, (char *)&ut, sizeof(struct utmp)) !=
 		    sizeof(struct utmp))
 			(void)ftruncate(fd, buf.st_size);
