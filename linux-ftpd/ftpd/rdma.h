@@ -182,6 +182,7 @@ struct Bufdatblk {
 	struct ibv_qp 		*qp;		/* qp */
 	int			seqnum;
 	off_t			offset;
+	int			zeroed;		/* data area known to be all zero */
 
 	pthread_mutex_t		*writer_lockp;	/* get from Fileinfo*/
 

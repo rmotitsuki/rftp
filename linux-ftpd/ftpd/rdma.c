@@ -88,6 +88,8 @@
     #include <arpa/inet.h>   /* netinet/in.h must be before this on SunOS */
 
 #include <dirent.h>	/* for dir resolve */
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #include "rdma.h"
 #include "errors.h"
@@ -3636,11 +3638,37 @@ parsepath(const char *local, const char *remote)
 	return;
 }
 
+/* is fd the /dev/zero character device? */
+static int
+fd_is_devzero(int fd)
+{
+	struct stat st;
+
+	return fstat(fd, &st) == 0 && S_ISCHR(st.st_mode)
+	    && major(st.st_rdev) == 1 && minor(st.st_rdev) == 5;
+}
+
 int
 load_dat_blk(BUFDATBLK *bufblk)
 {
 	int cur = 0;
 	int iret;
+
+	/*
+	 * /dev/zero only ever returns zeros, so there is no need to pay a
+	 * read() (a kernel memset of every block) per block: zero the data
+	 * area once and reuse it.  This keeps a memory-to-memory test
+	 * limited by the network instead of by clear_user() on one core.
+	 */
+	if (fd_is_devzero(bufblk->fd)) {
+		if (!bufblk->zeroed) {
+			memset(bufblk->rdma_buf + sizeof(rmsgheader), 0,
+			       bufblk->buflen - sizeof(rmsgheader));
+			bufblk->zeroed = 1;
+		}
+		return bufblk->buflen - sizeof(rmsgheader);
+	}
+	bufblk->zeroed = 0;
 
 	if (opt.disk_io_siz >= opt.cbufsiz)
 		return readn(bufblk->fd, bufblk->rdma_buf + sizeof(rmsgheader), bufblk->buflen - sizeof(rmsgheader));
