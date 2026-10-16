@@ -3481,6 +3481,40 @@ parsedir(const char *dir)
 }
 
 /*
+ * A previous transfer can end while a worker still holds (or was cancelled
+ * while holding) one of these static locks; a stale lock makes the next
+ * transfer silently ignore every block request.  Called with no transfer
+ * thread running.
+ */
+void
+rdma_state_reset(void)
+{
+	pthread_mutex_init(&rqblk_mutex, NULL);
+	pthread_mutex_init(&rqblk_once_mutex, NULL);
+}
+
+/*
+ * Receiver side: close the destination files of the finished transfer.
+ * Without this the descriptors (and, for a file deleted meanwhile, its
+ * space on tmpfs) leak for the lifetime of the session.
+ */
+void
+finfo_close_all(void)
+{
+	FILEINFO *item;
+
+	TAILQ_LOCK(&finfo_tqh);
+	while (!TAILQ_EMPTY(&finfo_tqh)) {
+		item = TAILQ_FIRST(&finfo_tqh);
+		TAILQ_REMOVE(&finfo_tqh, item, entries);
+		if (item->fd >= 0)
+			close(item->fd);
+		free(item);
+	}
+	TAILQ_UNLOCK(&finfo_tqh);
+}
+
+/*
  * Drop file entries left over from a previous command that failed or was
  * aborted before the scheduler consumed them.
  */
@@ -3488,6 +3522,8 @@ void
 finfo_reset(void)
 {
 	FILEINFO *item;
+
+	rdma_state_reset();
 
 	TAILQ_LOCK(&finfo_tqh);
 	while (!TAILQ_EMPTY(&finfo_tqh)) {

@@ -1167,6 +1167,7 @@ void rretrieve(const char *cmd, const char *name)
 	/* per-transfer counters: the child process serves many transfers */
 	transcurrlen = transtotallen = 0;
 	is_disconnected_event = 0;
+	rdma_state_reset();
 	
 	parsepath(name, name);
 	if (TAILQ_EMPTY(&finfo_tqh)) {
@@ -1374,6 +1375,7 @@ void rstore(const char *name, const char *mode, int unique)
 	/* per-transfer counters: the child process serves many transfers */
 	transcurrlen = transtotallen = 0;
 	is_disconnected_event = 0;
+	rdma_state_reset();
 	
 	if (unique && stat(name, &st) == 0) {
 		char *nam;
@@ -2304,8 +2306,10 @@ static int rreceive_data(FILE *outstr)
 
 		for (i = 0; i < opt.writernum; i ++) {
 			pthread_cancel(writer_tid[i]);
+			pthread_join(writer_tid[i], NULL);
 			syslog(LOG_ERR, "cancel writer[%d] success", i);
 		}
+		finfo_close_all();
 		
 		/* release the connected rdma_cm_id */
 		/* cq_thread - cm_thread */

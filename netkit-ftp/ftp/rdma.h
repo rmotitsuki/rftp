@@ -531,6 +531,8 @@ void parsedir(const char *dir);
 void parsepath(const char *local, const char *remote);
 
 void finfo_reset(void);
+void rdma_state_reset(void);
+void finfo_close_all(void);
 void cq_workers_stop(struct rdma_cb *cb);
 void dc_conn_req(struct rdma_cb *cb);
 
