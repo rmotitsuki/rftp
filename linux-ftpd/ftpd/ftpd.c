@@ -1163,6 +1163,10 @@ void rretrieve(const char *cmd, const char *name)
 	TAILQ_INIT(&finfo_tqh);
 	
 	TAILQ_INIT(&rcif_tqh);
+
+	/* per-transfer counters: the child process serves many transfers */
+	transcurrlen = transtotallen = 0;
+	is_disconnected_event = 0;
 	
 	parsepath(name, name);
 	if (TAILQ_EMPTY(&finfo_tqh)) {
@@ -1366,6 +1370,10 @@ void rstore(const char *name, const char *mode, int unique)
 	TAILQ_INIT(&finfo_tqh);
 	
 	TAILQ_INIT(&rcif_tqh);
+
+	/* per-transfer counters: the child process serves many transfers */
+	transcurrlen = transtotallen = 0;
+	is_disconnected_event = 0;
 	
 	if (unique && stat(name, &st) == 0) {
 		char *nam;
