@@ -2010,9 +2010,10 @@ int rdma_connect_client(struct rdma_cb *cb)
 	int ret;
 
 	memset(&conn_param, 0, sizeof conn_param);
+	conn_param.rnr_retry_count = 7;	/* 7 = retry forever on RNR NAK */
 	conn_param.responder_resources = 8;
 	conn_param.initiator_depth = 8;
-	conn_param.retry_count = 10;
+	conn_param.retry_count = 7;	/* 3-bit field; 10 was truncated */
 
 	ret = rdma_connect(cb->cm_id, &conn_param);
 	if (ret) {
@@ -2034,6 +2035,7 @@ int iperf_accept(struct rdma_cb *cb)
 	DEBUG_LOG("accepting client connection request\n");
 
 	memset(&conn_param, 0, sizeof conn_param);
+	conn_param.rnr_retry_count = 7;	/* 7 = retry forever on RNR NAK */
 	conn_param.responder_resources = 8;
 	conn_param.initiator_depth = 8;
 
@@ -2364,9 +2366,10 @@ for (; j < opt.data_addr_num; j ++) {
 		
 		/* connect cm_id */
 		memset(&conn_param, 0, sizeof conn_param);
+		conn_param.rnr_retry_count = 7;	/* 7 = retry forever on RNR NAK */
 		conn_param.responder_resources = 1;
 		conn_param.initiator_depth = 1;
-		conn_param.retry_count = 10;
+		conn_param.retry_count = 7;	/* 3-bit field; 10 was truncated */
 		
 		ret = rdma_connect(rcinfo->cm_id, &conn_param);
 		if (ret) {
@@ -2483,6 +2486,7 @@ void create_dc_stream_server(struct rdma_cb *cb, int num)
 		
 		/* accept new connection */
 		memset(&conn_param, 0, sizeof conn_param);
+		conn_param.rnr_retry_count = 7;	/* 7 = retry forever on RNR NAK */
 		conn_param.responder_resources = 1;
 		conn_param.initiator_depth = 1;
 		
