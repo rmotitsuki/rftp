@@ -218,9 +218,20 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 	newbuf = (struct rdma_info_blk *) malloc(sizeof(struct rdma_info_blk));
 	memset(newbuf, '\0', sizeof(struct rdma_info_blk));
 	memcpy(newbuf, &recvwr->recv_buf, sizeof(struct rdma_info_blk));
+
+	/* Repost the receive right away: the message was copied into newbuf,
+	   and handlers such as prep_blk() may block waiting for a free block.
+	   Holding the receive until then left the peer with no posted receive
+	   and caused RNR NAKs (stalls of tens/hundreds of ms each). */
+	ret = ibv_post_recv(cb->qp, &recvwr->recv_wr, &bad_wr);
+	if (ret) {
+		syslog(LOG_ERR, "post recv error: %d\n", ret);
+		free(newbuf);
+		return -1;
+	}
 	
-	if (recvwr->recv_buf.mode == kRdmaTrans_ActWrte) {
-		switch (recvwr->recv_buf.stat) {
+	if (newbuf->mode == kRdmaTrans_ActWrte) {
+		switch (newbuf->stat) {
 		case ACTIVE_WRITE_FIN:
 			/* try to return some addresses to data source */
 			if (pthread_mutex_trylock(&rqblk_mutex) == 0) {
@@ -228,7 +239,7 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 				pthread_mutex_unlock(&rqblk_mutex);
 			}
 			/* take the block out */
-			ret = recv_data(&recvwr->recv_buf);
+			ret = recv_data(newbuf);
 			if (ret != 0) {
 				syslog(LOG_ERR, "recv_data fail");
 				exit(EXIT_FAILURE);
@@ -247,7 +258,7 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 			}
 			break;
 		case ACTIVE_WRITE_RPBLK:
-			ret = acpt_blk(&recvwr->recv_buf);
+			ret = acpt_blk(newbuf);
 			if (ret != 0) {
 				syslog(LOG_ERR, "acpt_blk fail");
 				exit(EXIT_FAILURE);
@@ -255,7 +266,7 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 			break;
 		case FILE_SESSION_ID_REQUEST:
 			tmpcb = cb;
-			ret = handle_file_session_req(&recvwr->recv_buf);
+			ret = handle_file_session_req(newbuf);
 			if (ret != 0) {
 				syslog(LOG_ERR, "handle_file_session_req fail");
 				exit(EXIT_FAILURE);
@@ -263,7 +274,7 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 			break;
 		case FILE_SESSION_ID_RESPONSE:
 			tmpcb = cb;
-			ret = handle_file_session_rep(&recvwr->recv_buf);
+			ret = handle_file_session_rep(newbuf);
 			if (ret != 0) {
 				syslog(LOG_ERR, "handle_file_session_rep fail");
 				exit(EXIT_FAILURE);
@@ -271,11 +282,11 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 			break;
 		case DC_CONNECTION_REQ:
 			memset(str, '\0', INET6_ADDRSTRLEN);
-			memcpy(&opt.rcstreamnum, recvwr->recv_buf.addr, 4);
-			memcpy(&opt.data_addr_num, recvwr->recv_buf.addr + 4, 4);
+			memcpy(&opt.rcstreamnum, newbuf->addr, 4);
+			memcpy(&opt.data_addr_num, newbuf->addr + 4, 4);
 			for (i = 0; i < opt.data_addr_num; i ++) {
 				memcpy(str, \
-					recvwr->recv_buf.addr + 8 + 15 * i, \
+					newbuf->addr + 8 + 15 * i, \
 					15);
 				opt.data_addr[i].sin_addr.s_addr = inet_addr(str);
 				/* if (inet_pton(AF_INET, str, &opt.data_addr[i]) == NULL) {
@@ -288,7 +299,7 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 			break;
 		default:
 			syslog(LOG_ERR, "unrecognized stat %d\n", \
-			       recvwr->recv_buf.stat);
+			       newbuf->stat);
 			break;
 		}
 	}
@@ -298,12 +309,6 @@ static int do_recv(struct rdma_cb *cb, struct ibv_wc *wc)
 	/* the created thread should copy the recvbuf
 	   otherwise, the recvbuf could be flushed */
 	
-	/* repost the RDMA_RECV work request */
-	ret = ibv_post_recv(cb->qp, &recvwr->recv_wr, &bad_wr);
-	if (ret) {
-		syslog(LOG_ERR, "post recv error: %d\n", ret);
-		return -1;
-	}
 
 /*	sem_post(&cb->sem);
 

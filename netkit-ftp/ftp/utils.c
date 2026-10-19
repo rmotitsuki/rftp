@@ -250,8 +250,11 @@ update_param(struct options *opt)
 	else
 		opt->evbufnum = opt->rdma_qp_sq_depth - 1;
 
-	if (opt->cbufnum < opt->rdma_qp_rq_depth)
-		opt->recvbufnum = opt->cbufnum;
+	/* All control messages (one FIN per block, credit requests and
+	   replies) arrive on the single control QP: keep receives posted
+	   well above the number of blocks so the peer never hits RNR. */
+	if (2 * opt->cbufnum + 64 < opt->rdma_qp_rq_depth)
+		opt->recvbufnum = 2 * opt->cbufnum + 64;
 	else
 		opt->recvbufnum = opt->rdma_qp_rq_depth - 1;
 
